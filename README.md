@@ -135,7 +135,7 @@ No database. No cloud sync. No telemetry. Just a file you can read in a text edi
 
 ## Downloads
 
-Prebuilt installers and portable executables are published on the [GitHub Releases page](https://github.com/klokkish/ereader/releases).
+Prebuilt installers and portable executables are published through project releases.
 
 ## Building from Source
 
