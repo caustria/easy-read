@@ -38,7 +38,7 @@
   import WelcomeView from "$lib/components/WelcomeView.svelte";
 
   /**
-   * @typedef {{ title: string, author: string }} BookMetadata
+   * @typedef {{ title: string, author: string, cover_image?: string | null }} BookMetadata
    * @typedef {{ Html?: string, PlainText?: string }} ChapterContent
    * @typedef {{ title?: string | null, content: ChapterContent }} Chapter
    * @typedef {{ metadata: BookMetadata, chapters: Chapter[] }} Book
@@ -47,7 +47,7 @@
    * @typedef {{ id: string, chapter_index: number, text: string, note?: string | null }} Quote
    * @typedef {{ last_chapter: number, last_page: number, last_scroll_top?: number | null, title: string, author: string, bookmarks?: Bookmark[], highlights?: Highlight[], quotes?: Quote[] }} BookRecord
    * @typedef {{ font_size?: number | null, theme?: Theme | null, font_family?: FontFamily | null, line_height?: number | null, text_align?: TextAlign | null, reader_mode?: ReaderMode | null } & Record<string, string | number | null | undefined>} Preferences
-   * @typedef {{ preferences?: Preferences, last_opened?: string | null, books?: Record<string, BookRecord> }} AppState
+   * @typedef {{ preferences?: Preferences, last_opened?: string | null, books?: Record<string, BookRecord>, state_recovered?: boolean }} AppState
    * @typedef {{ filePath: string, chapterIndex: number, pageIndex: number, title: string, author: string }} ProgressSnapshot
    * @typedef {{ chapter_index: number, chapter_title?: string | null, snippet: string }} SearchResult
    * @typedef {{ file_path: string, title: string, author: string, last_chapter: number, has_bookmarks?: boolean, has_quotes?: boolean }} HistoryEntry
@@ -62,6 +62,9 @@
    * @typedef {"paginated" | "scroll"} ReaderMode
    * @typedef {() => void} Unlisten
    */
+
+  const isMac = typeof navigator !== "undefined" && navigator.userAgent.includes("Mac");
+  let loadSeq = 0;
 
   // ── Core reading state ──
   /** @type {Book | null} */
@@ -95,8 +98,13 @@
   /** @type {number | null} */
   let saveProgressTimer = null;
   /** @type {number | null} */
+  let scrollSessionSaveTimer = null;
+  /** @type {number | null} */
   let layoutSettlingTimer = null;
+  /** @type {number | null} */
+  let contentResizeTimer = null;
   let layoutSettlingVersion = 0;
+  let paginationRequestVersion = 0;
   let pendingProgressSave = false;
   /** @type {number | null} */
   let pendingLastPageChapterIndex = null;
@@ -108,6 +116,8 @@
   let savedPreferences = {};
   let layoutSettling = false;
   let scrubbing = $state(false);
+  let wheelDeltaAccumulator = 0;
+  let wheelCooldownUntil = 0;
   /** @type {HTMLDivElement | null} */
   let progressTrackEl = $state(null);
 
@@ -117,6 +127,8 @@
   /** @type {AppState | null} */
   let appState = $state(null);
   let error = $state("");
+  /** @type {number | null} */
+  let errorToastTimer = null;
 
   // ── Search ──
   let searchQuery = $state("");
@@ -158,9 +170,10 @@
   let readingArea = $state(null);
   let containerHeight = $state(0);
   let contentHeight = $state(0);
+  let lineHeightPx = $state(1);
 
   // ── Derived ──
-  let pageStep = $derived(calculatePageStep(containerHeight, fontSize));
+  let pageStep = $derived(calculatePageStep(containerHeight, fontSize, lineHeightPx));
   let pageOffset = $derived(calculatePageOffset(contentHeight, containerHeight, pageStep, currentPage));
   let isCurrentPageBookmarked = $derived(
     bookmarks.some(b => b.chapter_index === currentChapterIndex && b.page_index === currentPage)
@@ -193,7 +206,7 @@
     const ul1 = await listen("tauri://drag-drop", async (event) => {
       isDragOver = false;
       isDragBad = false;
-      const paths = event.payload.paths;
+      const paths = event.payload?.paths;
       if (paths?.length > 0) await loadBook(paths[0]);
     });
     const ul2 = await listen("tauri://drag-enter", (event) => {
@@ -218,27 +231,34 @@
     unlistens = [ul1, ul2, ul3, closeUnlisten];
     document.addEventListener("keydown", handleKeydown);
 
-    const state = /** @type {AppState} */ (await invoke("get_state"));
-    appState = state;
-    const prefs = state.preferences ?? {};
-    if (prefs.font_size)   fontSize   = prefs.font_size;
-    if (prefs.theme)       theme      = prefs.theme;
-    if (prefs.font_family) fontFamily = prefs.font_family;
-    if (prefs.line_height) lineHeight = prefs.line_height;
-    if (prefs.text_align)  textAlign  = prefs.text_align;
-    scrollMode = prefs.reader_mode === "scroll";
-    savedPreferences = {
-      font_size: prefs.font_size ?? null,
-      theme: prefs.theme ?? null,
-      font_family: prefs.font_family ?? null,
-      line_height: prefs.line_height ?? null,
-      text_align: prefs.text_align ?? null,
-      reader_mode: prefs.reader_mode ?? null,
-    };
+    try {
+      const state = /** @type {AppState} */ (await invoke("get_state"));
+      appState = state;
+      if (state.state_recovered) {
+        showErrorToast("Your saved reading state was corrupt, so Easy Read started fresh and kept a backup beside state.json.");
+      }
+      const prefs = state.preferences ?? {};
+      if (prefs.font_size)   fontSize   = prefs.font_size;
+      if (prefs.theme)       theme      = prefs.theme;
+      if (prefs.font_family) fontFamily = prefs.font_family;
+      if (prefs.line_height) lineHeight = prefs.line_height;
+      if (prefs.text_align)  textAlign  = prefs.text_align;
+      scrollMode = prefs.reader_mode === "scroll";
+      savedPreferences = {
+        font_size: prefs.font_size ?? null,
+        theme: prefs.theme ?? null,
+        font_family: prefs.font_family ?? null,
+        line_height: prefs.line_height ?? null,
+        text_align: prefs.text_align ?? null,
+        reader_mode: prefs.reader_mode ?? null,
+      };
 
-    if (state.last_opened) {
-      await loadBook(state.last_opened, true);
-      if (!book) await invoke("clear_last_opened").catch(() => {});
+      if (state.last_opened) {
+        await loadBook(state.last_opened, true);
+        if (!book) await invoke("clear_last_opened").catch(() => {});
+      }
+    } catch (err) {
+      showErrorToast(errorMessage(err, "Could not load saved reading state."));
     }
   });
 
@@ -247,7 +267,10 @@
     document.removeEventListener("keydown", handleKeydown);
     clearPendingSearch();
     if (saveProgressTimer !== null) clearTimeout(saveProgressTimer);
+    if (scrollSessionSaveTimer !== null) clearTimeout(scrollSessionSaveTimer);
     if (layoutSettlingTimer !== null) clearTimeout(layoutSettlingTimer);
+    if (contentResizeTimer !== null) clearTimeout(contentResizeTimer);
+    if (errorToastTimer !== null) clearTimeout(errorToastTimer);
   });
 
   // Apply theme attribute to <html>
@@ -275,9 +298,9 @@
 
   /** @param {FontFamily} f */
   function fontFamilyStack(f) {
-    if (f === "sans") return "'Inter', system-ui, sans-serif";
-    if (f === "mono") return "'JetBrains Mono', 'Fira Code', Consolas, monospace";
-    return "Georgia, 'Noto Serif', serif";
+    if (f === "sans") return '"Easy Read UI", system-ui, sans-serif';
+    if (f === "mono") return '"Easy Read Mono", Consolas, monospace';
+    return '"Easy Read Serif", serif';
   }
 
   /**
@@ -301,6 +324,32 @@
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
+  /**
+   * @param {unknown} err
+   * @param {string} fallback
+   */
+  function errorMessage(err, fallback) {
+    if (typeof err === "string" && err.trim()) return err;
+    if (err instanceof Error && err.message) return err.message;
+    return fallback;
+  }
+
+  /** @param {string} message */
+  function showErrorToast(message) {
+    error = message;
+    if (errorToastTimer !== null) clearTimeout(errorToastTimer);
+    errorToastTimer = setTimeout(() => {
+      errorToastTimer = null;
+      if (error === message) error = "";
+    }, 4000);
+  }
+
+  function clearErrorToast() {
+    if (errorToastTimer !== null) clearTimeout(errorToastTimer);
+    errorToastTimer = null;
+    error = "";
+  }
+
   // Track reading area height
   $effect(() => {
     const area = readingArea;
@@ -310,6 +359,21 @@
     ro.observe(area);
     update();
     return () => ro.disconnect();
+  });
+
+  // Track rendered content growth after fonts/images settle.
+  $effect(() => {
+    const content = readerEl;
+    if (!content) return;
+    const ro = new ResizeObserver(() => scheduleContentRecalc());
+    ro.observe(content);
+    return () => {
+      ro.disconnect();
+      if (contentResizeTimer !== null) {
+        clearTimeout(contentResizeTimer);
+        contentResizeTimer = null;
+      }
+    };
   });
 
   // Wheel-to-page in paginated mode (must be non-passive to call preventDefault)
@@ -325,9 +389,15 @@
     void chapterHtml;
     void fontSize;
     void lineHeight;
+    void fontFamily;
     void containerHeight;
     void scrollMode;
-    tick().then(recalcPages);
+    const version = ++paginationRequestVersion;
+    tick()
+      .then(waitForFonts)
+      .then(() => {
+        if (version === paginationRequestVersion) recalcPages();
+      });
   });
 
   // Scroll mode: track scroll position → currentPage
@@ -335,7 +405,7 @@
     const area = readingArea;
     if (!scrollMode || !area) return;
     const onScroll = () => {
-      if (pageStep === 0) return;
+      if (containerHeight === 0) return;
       const maxOffset = Math.max(0, contentHeight - containerHeight);
       const rawPage = maxOffset > 0 && area.scrollTop >= maxOffset - 1
         ? totalPages - 1
@@ -347,6 +417,7 @@
           { save: false, restore: false }
         );
       }
+      scheduleScrollSessionStateSave();
     };
     area.addEventListener('scroll', onScroll, { passive: true });
     return () => area.removeEventListener('scroll', onScroll);
@@ -359,6 +430,32 @@
     if (!scrollMode) return;
     tick().then(scrollToCurrentPage);
   });
+
+  async function waitForFonts() {
+    const fonts = document.fonts;
+    if (!fonts?.ready) return;
+    try {
+      await fonts.ready;
+    } catch (_) {}
+  }
+
+  function measureLineHeightPx() {
+    if (!readerEl) return Math.max(1, fontSize * lineHeight);
+    const computed = getComputedStyle(readerEl);
+    const parsed = Number.parseFloat(computed.lineHeight);
+    return Number.isFinite(parsed) && parsed > 0
+      ? parsed
+      : Math.max(1, fontSize * lineHeight);
+  }
+
+  function scheduleContentRecalc() {
+    if (scrollMode || !readerEl || containerHeight === 0) return;
+    if (contentResizeTimer !== null) clearTimeout(contentResizeTimer);
+    contentResizeTimer = setTimeout(() => {
+      contentResizeTimer = null;
+      recalcPages();
+    }, 100);
+  }
 
   /**
    * @param {number} [releaseDelay]
@@ -436,10 +533,13 @@
   }
 
   function recalcPages() {
-    if (!readerEl || pageStep === 0) return;
+    if (!readerEl || containerHeight === 0) return;
     const settlingVersion = beginLayoutSettling();
+    const measuredLineHeight = measureLineHeightPx();
+    lineHeightPx = measuredLineHeight;
+    const effectivePageStep = calculatePageStep(containerHeight, fontSize, measuredLineHeight);
     contentHeight = readerEl.scrollHeight;
-    const pages = calculatePageCount(contentHeight, pageStep, containerHeight);
+    const pages = calculatePageCount(contentHeight, effectivePageStep, containerHeight);
     totalPages = pages;
     const shouldLandOnLastPage = pendingLastPageChapterIndex === currentChapterIndex;
     if (shouldLandOnLastPage) pendingLastPageChapterIndex = null;
@@ -461,18 +561,22 @@
    * @param {boolean} [silent]
    */
   async function loadBook(path, silent = false) {
-    error = "";
+    const seq = ++loadSeq;
+    if (!silent) clearErrorToast();
+    resetBookChangeSearchState();
     pendingLastPageChapterIndex = null;
     try {
       const state = /** @type {AppState} */ (await invoke("get_state"));
+      if (seq !== loadSeq) return;
       const loadedBook = /** @type {Book} */ (await invoke("open_book", { path }));
-      appState = state;
-      book = loadedBook;
-      currentBookPath = path;
+      if (seq !== loadSeq) return;
       const record = state.books?.[path];
       if (record) {
         const chapterIndex = clampIndex(record.last_chapter, loadedBook.chapters.length);
         const pageIndex = clampNonNegativeInteger(record.last_page);
+        appState = state;
+        book = loadedBook;
+        currentBookPath = path;
         pendingScrollTopRestore = scrollMode && Number.isFinite(record.last_scroll_top)
           ? Math.max(0, Number(record.last_scroll_top))
           : null;
@@ -482,19 +586,24 @@
         highlights = record.highlights ?? [];
         quotes = record.quotes ?? [];
       } else {
+        await invoke("update_progress", {
+          filePath: path, chapterIndex: 0, pageIndex: 0,
+          title: loadedBook.metadata.title, author: loadedBook.metadata.author,
+        });
+        if (seq !== loadSeq) return;
+        appState = state;
+        book = loadedBook;
+        currentBookPath = path;
         pendingScrollTopRestore = null;
         setReadingPosition({ chapterIndex: 0, pageIndex: 0 }, { save: false, restore: false });
         bookmarks = [];
         highlights = [];
         quotes = [];
-        await invoke("update_progress", {
-          filePath: path, chapterIndex: 0, pageIndex: 0,
-          title: loadedBook.metadata.title, author: loadedBook.metadata.author,
-        });
         lastSavedProgress = progressSnapshot(path, 0, 0, loadedBook.metadata.title, loadedBook.metadata.author);
       }
     } catch (e) {
-      if (!silent) error = String(e);
+      if (seq !== loadSeq) return;
+      if (!silent) showErrorToast(errorMessage(e, "Could not open the book."));
       book = null;
       currentBookPath = null;
       lastSavedProgress = null;
@@ -503,8 +612,12 @@
   }
 
   async function openFilePicker() {
-    const path = await invoke("pick_file");
-    if (path) await loadBook(path);
+    try {
+      const path = await invoke("pick_file");
+      if (path) await loadBook(path);
+    } catch (err) {
+      showErrorToast(errorMessage(err, "Could not open the file picker."));
+    }
   }
 
   /**
@@ -577,6 +690,8 @@
     try {
       if (saveProgressTimer !== null) clearTimeout(saveProgressTimer);
       saveProgressTimer = null;
+      if (scrollSessionSaveTimer !== null) clearTimeout(scrollSessionSaveTimer);
+      scrollSessionSaveTimer = null;
       pendingProgressSave = false;
       const readerMode = /** @type {ReaderMode} */ (scrollMode ? "scroll" : "paginated");
       await invoke("save_session_state", {
@@ -591,6 +706,16 @@
     } catch (_) {}
   }
 
+  /** @param {number} [delay] */
+  function scheduleScrollSessionStateSave(delay = 1500) {
+    if (!scrollMode || !book || !currentBookPath) return;
+    if (scrollSessionSaveTimer !== null) clearTimeout(scrollSessionSaveTimer);
+    scrollSessionSaveTimer = setTimeout(() => {
+      scrollSessionSaveTimer = null;
+      void persistSessionState();
+    }, delay);
+  }
+
   /** @param {number} pct */
   function seekToPercent(pct) {
     if (!book || !book.chapters.length) return;
@@ -599,28 +724,36 @@
     requestProgressSave(!scrubbing);
   }
 
-  /** @param {MouseEvent} e */
+  /** @param {PointerEvent} e */
   function handleProgressDown(e) {
     if (!book || !progressTrackEl) return;
     e.preventDefault();
     scrubbing = true;
     const track = progressTrackEl;
-    const rect = track.getBoundingClientRect();
-    seekToPercent((e.clientX - rect.left) / rect.width * 100);
+    track.setPointerCapture(e.pointerId);
 
-    /** @param {MouseEvent} me */
-    const onMove = (me) => {
+    /** @param {PointerEvent} pe */
+    const updateFromPointer = (pe) => {
       const r = track.getBoundingClientRect();
-      seekToPercent((me.clientX - r.left) / r.width * 100);
+      seekToPercent((pe.clientX - r.left) / r.width * 100);
     };
-    const onUp = () => {
+
+    /** @param {PointerEvent} pe */
+    const endScrub = (pe) => {
+      if (pe.type === "pointerup") updateFromPointer(pe);
       scrubbing = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
+      track.removeEventListener("pointermove", updateFromPointer);
+      track.removeEventListener("pointerup", endScrub);
+      track.removeEventListener("pointercancel", endScrub);
+      track.removeEventListener("lostpointercapture", endScrub);
       flushScheduledProgress();
     };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+
+    updateFromPointer(e);
+    track.addEventListener("pointermove", updateFromPointer);
+    track.addEventListener("pointerup", endScrub);
+    track.addEventListener("pointercancel", endScrub);
+    track.addEventListener("lostpointercapture", endScrub);
   }
 
   /**
@@ -643,6 +776,12 @@
     searchMode = "book";
   }
 
+  function resetBookChangeSearchState() {
+    resetSearchPanel();
+    pendingTextCue = null;
+    if (activePanel === "search") activePanel = null;
+  }
+
   function closePanel() {
     if (activePanel === "search") resetSearchPanel();
     activePanel = null;
@@ -653,7 +792,11 @@
     if (activePanel === "search" && panel !== "search") resetSearchPanel();
     activePanel = panel;
     if (panel === "history") {
-      historyEntries = /** @type {HistoryEntry[]} */ (await invoke("get_book_history"));
+      try {
+        historyEntries = /** @type {HistoryEntry[]} */ (await invoke("get_book_history"));
+      } catch (err) {
+        showErrorToast(errorMessage(err, "Could not load reading history."));
+      }
     }
   }
 
@@ -679,25 +822,29 @@
 
   /** @param {KeyboardEvent} e */
   async function handleKeydown(e) {
-    if (e.ctrlKey && e.key === "o") { e.preventDefault(); openFilePicker(); return; }
-    if (e.ctrlKey && (e.key === "+" || e.key === "=")) { e.preventDefault(); adjustFontSize(1); return; }
-    if (e.ctrlKey && e.key === "-") { e.preventDefault(); adjustFontSize(-1); return; }
-    if (e.ctrlKey && e.key === "f") {
+    const key = e.key.toLowerCase();
+    const mod = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey;
+    const hasShortcutModifier = mod || e.ctrlKey || e.metaKey || e.altKey;
+
+    if (mod && key === "o") { e.preventDefault(); openFilePicker(); return; }
+    if (mod && (e.key === "+" || e.key === "=")) { e.preventDefault(); adjustFontSize(1); return; }
+    if (mod && e.key === "-") { e.preventDefault(); adjustFontSize(-1); return; }
+    if (mod && key === "f") {
       e.preventDefault();
       await togglePanel("search");
       return;
     }
-    if (e.ctrlKey && e.key === "b") {
+    if (mod && key === "b") {
       e.preventDefault();
       await togglePanel("bookmarks");
       return;
     }
-    if (e.ctrlKey && e.key === "q") {
+    if ((isMac ? mod && e.shiftKey && key === "q" : mod && key === "q")) {
       e.preventDefault();
       await togglePanel("quotes");
       return;
     }
-    if (e.ctrlKey && e.key === "h") {
+    if ((isMac ? mod && key === "y" : mod && key === "h")) {
       e.preventDefault();
       await togglePanel("history");
       return;
@@ -716,19 +863,20 @@
     if (!book) return;
     const target = e.target;
     const inInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
-    if (!inInput && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    if (!inInput && !hasShortcutModifier) {
       if (e.key === ";" || e.key === "?") {
         e.preventDefault();
         await togglePanel("hotkeys");
         return;
       }
-      if (e.key === "b") { e.preventDefault(); toggleBookmark(); return; }
-      if (e.key === "q") {
+      if (e.shiftKey) return;
+      if (e.code === "KeyB") { e.preventDefault(); toggleBookmark(); return; }
+      if (e.code === "KeyQ") {
         if (!selectionPopup) handleTextSelection();
         if (selectionPopup) { e.preventDefault(); saveAsQuote(); return; }
       }
-      if (e.key === "j") { e.preventDefault(); nextPage(); return; }
-      if (e.key === "k") { e.preventDefault(); prevPage(); return; }
+      if (e.code === "KeyJ") { e.preventDefault(); nextPage(); return; }
+      if (e.code === "KeyK") { e.preventDefault(); prevPage(); return; }
     }
     if (e.shiftKey && e.key === "Tab" && activePanel === "search") {
       e.preventDefault();
@@ -774,8 +922,26 @@
   function handleReaderWheel(e) {
     if (scrollMode) return;
     e.preventDefault();
-    if (e.deltaY > 0) nextPage();
-    else if (e.deltaY < 0) prevPage();
+    const normalizedDelta = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+    if (normalizedDelta === 0) return;
+
+    const now = performance.now();
+    if (now < wheelCooldownUntil) return;
+
+    if (wheelDeltaAccumulator !== 0 && Math.sign(normalizedDelta) !== Math.sign(wheelDeltaAccumulator)) {
+      wheelDeltaAccumulator = 0;
+    }
+    wheelDeltaAccumulator += normalizedDelta;
+
+    if (wheelDeltaAccumulator >= 100) {
+      wheelDeltaAccumulator = 0;
+      wheelCooldownUntil = now + 180;
+      nextPage();
+    } else if (wheelDeltaAccumulator <= -100) {
+      wheelDeltaAccumulator = 0;
+      wheelCooldownUntil = now + 180;
+      prevPage();
+    }
   }
 
   function scrollToCurrentPage() {
@@ -784,7 +950,7 @@
       readingArea.scrollTop = 0;
       return;
     }
-    if (pageStep === 0) return;
+    if (containerHeight === 0) return;
     const targetScrollTop = pendingScrollTopRestore ?? pageOffset;
     readingArea.scrollTop = targetScrollTop;
     if (pendingScrollTopRestore !== null) {
@@ -839,20 +1005,27 @@
 
   async function toggleBookmark() {
     if (!currentBookPath) return;
+    const filePath = currentBookPath;
+    const chapterIndex = currentChapterIndex;
+    const pageIndex = currentPage;
+    const previousBookmarks = bookmarks;
+    const bookmarkExists = bookmarks.some(
+      b => b.chapter_index === chapterIndex && b.page_index === pageIndex
+    );
+    const nextBookmarks = bookmarkExists
+      ? bookmarks.filter(b => !(b.chapter_index === chapterIndex && b.page_index === pageIndex))
+      : [...bookmarks, { chapter_index: chapterIndex, page_index: pageIndex, label: null }];
+    bookmarks = nextBookmarks;
     try {
-      const added = await invoke("toggle_bookmark", {
-        filePath: currentBookPath,
-        chapterIndex: currentChapterIndex,
-        pageIndex: currentPage,
+      await invoke("toggle_bookmark", {
+        filePath,
+        chapterIndex,
+        pageIndex,
       });
-      if (added) {
-        bookmarks = [...bookmarks, { chapter_index: currentChapterIndex, page_index: currentPage, label: null }];
-      } else {
-        bookmarks = bookmarks.filter(
-          b => !(b.chapter_index === currentChapterIndex && b.page_index === currentPage)
-        );
-      }
-    } catch (_) {}
+    } catch (err) {
+      if (currentBookPath === filePath && bookmarks === nextBookmarks) bookmarks = previousBookmarks;
+      showErrorToast(errorMessage(err, "Could not update the bookmark."));
+    }
   }
 
   /** @param {Bookmark} bm */
@@ -1036,6 +1209,21 @@
     }
 
     return valid;
+  }
+
+  /**
+   * @param {number} x
+   * @param {number} y
+   * @returns {{ x: number, y: number }}
+   */
+  function clampSelectionPopupPosition(x, y) {
+    const margin = 8;
+    const halfWidth = 100;
+    const height = 44;
+    return {
+      x: Math.min(window.innerWidth - margin - halfWidth, Math.max(margin + halfWidth, x)),
+      y: Math.min(window.innerHeight - margin, Math.max(margin + height, y)),
+    };
   }
 
   // Apply / re-apply all highlights for the current chapter to the DOM.
@@ -1230,16 +1418,25 @@
   /** @param {string} text */
   async function saveHighlightAsQuote(text) {
     if (!currentBookPath || !text) return;
-    const id = Date.now().toString();
+    const filePath = currentBookPath;
+    const chapterIndex = currentChapterIndex;
+    const id = crypto.randomUUID();
+    const previousQuotes = quotes;
+    const nextQuotes = [...quotes, { id, chapter_index: chapterIndex, text, note: null }];
     highlightCtxMenu = null;
-    await invoke("add_quote", {
-      filePath: currentBookPath,
-      chapterIndex: currentChapterIndex,
-      text,
-      note: null,
-      id,
-    }).catch(() => {});
-    quotes = [...quotes, { id, chapter_index: currentChapterIndex, text, note: null }];
+    quotes = nextQuotes;
+    try {
+      await invoke("add_quote", {
+        filePath,
+        chapterIndex,
+        text,
+        note: null,
+        id,
+      });
+    } catch (err) {
+      if (currentBookPath === filePath && quotes === nextQuotes) quotes = previousQuotes;
+      showErrorToast(errorMessage(err, "Could not save the quote."));
+    }
   }
 
   function handleTextSelection() {
@@ -1256,32 +1453,46 @@
     const start = getTextOffset(readerEl, range.startContainer, range.startOffset);
     const end   = getTextOffset(readerEl, range.endContainer,   range.endOffset);
     const rect  = range.getBoundingClientRect();
-    selectionPopup = { x: rect.left + rect.width / 2, y: rect.top - 8, start, end, text: sel.toString() };
+    selectionPopup = {
+      ...clampSelectionPopupPosition(rect.left + rect.width / 2, rect.top - 8),
+      start,
+      end,
+      text: sel.toString(),
+    };
   }
 
   /** @param {string} color */
   async function addHighlight(color) {
     if (!selectionPopup || !currentBookPath) return;
+    const filePath = currentBookPath;
+    const chapterIndex = currentChapterIndex;
     const { start, end } = selectionPopup;
-    selectionPopup = null;
-    window.getSelection()?.removeAllRanges();
-
-    await invoke("add_highlight", {
-      filePath: currentBookPath,
-      chapterIndex: currentChapterIndex,
-      startOffset: start,
-      endOffset: end,
-      color,
-      note: null,
-    }).catch(() => {});
-
-    highlights = [...highlights, {
-      chapter_index: currentChapterIndex,
+    const highlight = {
+      chapter_index: chapterIndex,
       start_offset: start,
       end_offset: end,
       color,
       note: null,
-    }];
+    };
+    const previousHighlights = highlights;
+    const nextHighlights = [...highlights, highlight];
+    selectionPopup = null;
+    window.getSelection()?.removeAllRanges();
+    highlights = nextHighlights;
+
+    try {
+      await invoke("add_highlight", {
+        filePath,
+        chapterIndex,
+        startOffset: start,
+        endOffset: end,
+        color,
+        note: null,
+      });
+    } catch (err) {
+      if (currentBookPath === filePath && highlights === nextHighlights) highlights = previousHighlights;
+      showErrorToast(errorMessage(err, "Could not save the highlight."));
+    }
   }
 
   /** @param {Highlight} hl */
@@ -1300,36 +1511,54 @@
 
   /** @param {Highlight} hl */
   async function removeHighlightAt(hl) {
-    await invoke("remove_highlight", {
-      filePath: currentBookPath,
-      chapterIndex: hl.chapter_index,
-      startOffset: hl.start_offset,
-      endOffset: hl.end_offset,
-    }).catch(() => {});
-    unwrapHighlightMarks(hl);
-    highlights = highlights.filter(h =>
+    if (!currentBookPath) return;
+    const filePath = currentBookPath;
+    const previousHighlights = highlights;
+    const nextHighlights = highlights.filter(h =>
       !(h.chapter_index === hl.chapter_index &&
         h.start_offset === hl.start_offset &&
         h.end_offset === hl.end_offset)
     );
+    unwrapHighlightMarks(hl);
+    highlights = nextHighlights;
+    try {
+      await invoke("remove_highlight", {
+        filePath,
+        chapterIndex: hl.chapter_index,
+        startOffset: hl.start_offset,
+        endOffset: hl.end_offset,
+      });
+    } catch (err) {
+      if (currentBookPath === filePath && highlights === nextHighlights) highlights = previousHighlights;
+      showErrorToast(errorMessage(err, "Could not remove the highlight."));
+    }
   }
 
   // ── Quotes ──
 
   async function saveAsQuote() {
     if (!selectionPopup || !currentBookPath) return;
+    const filePath = currentBookPath;
+    const chapterIndex = currentChapterIndex;
     const { text } = selectionPopup;
-    const id = Date.now().toString();
+    const id = crypto.randomUUID();
+    const previousQuotes = quotes;
+    const nextQuotes = [...quotes, { id, chapter_index: chapterIndex, text, note: null }];
     selectionPopup = null;
     window.getSelection()?.removeAllRanges();
-    await invoke("add_quote", {
-      filePath: currentBookPath,
-      chapterIndex: currentChapterIndex,
-      text,
-      note: null,
-      id,
-    }).catch(() => {});
-    quotes = [...quotes, { id, chapter_index: currentChapterIndex, text, note: null }];
+    quotes = nextQuotes;
+    try {
+      await invoke("add_quote", {
+        filePath,
+        chapterIndex,
+        text,
+        note: null,
+        id,
+      });
+    } catch (err) {
+      if (currentBookPath === filePath && quotes === nextQuotes) quotes = previousQuotes;
+      showErrorToast(errorMessage(err, "Could not save the quote."));
+    }
   }
 
   /** @param {Quote} q */
@@ -1342,8 +1571,16 @@
   /** @param {string} id */
   async function deleteQuote(id) {
     if (!currentBookPath) return;
-    await invoke("remove_quote", { filePath: currentBookPath, quoteId: id }).catch(() => {});
-    quotes = quotes.filter(q => q.id !== id);
+    const filePath = currentBookPath;
+    const previousQuotes = quotes;
+    const nextQuotes = quotes.filter(q => q.id !== id);
+    quotes = nextQuotes;
+    try {
+      await invoke("remove_quote", { filePath, quoteId: id });
+    } catch (err) {
+      if (currentBookPath === filePath && quotes === nextQuotes) quotes = previousQuotes;
+      showErrorToast(errorMessage(err, "Could not remove the quote."));
+    }
   }
 
   /** @param {HistoryEntry} entry */
@@ -1460,7 +1697,7 @@
 />
 
 {#if activePanel === "hotkeys"}
-  <HotkeysModal onClose={closePanel} />
+  <HotkeysModal {isMac} onClose={closePanel} />
 {/if}
 
 {#if activePanel === "history"}
@@ -1485,6 +1722,7 @@
     {isCurrentPageBookmarked}
     {overallProgress}
     {scrubbing}
+    {error}
     bind:readerEl
     bind:readingArea
     bind:progressTrackEl
@@ -1494,5 +1732,5 @@
     onProgressDown={handleProgressDown}
   />
 {:else}
-  <WelcomeView {isDragOver} {error} />
+  <WelcomeView {isDragOver} {error} {isMac} />
 {/if}

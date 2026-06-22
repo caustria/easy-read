@@ -8,10 +8,11 @@ pub fn toggle_bookmark(
     chapter_index: usize,
     page_index: usize,
 ) -> Result<bool, String> {
-    let mut s = state.lock().unwrap();
-    let Some(record) = s.books.get_mut(&file_path) else {
-        return Ok(false);
-    };
+    let mut s = crate::state::recover_lock(state.inner());
+    let record = s
+        .books
+        .entry(file_path)
+        .or_insert_with(|| crate::state::default_book_record(String::new(), String::new()));
     let existing = record
         .bookmarks
         .iter()
@@ -28,7 +29,7 @@ pub fn toggle_bookmark(
         true
     };
     let data_dir = data_dir.inner().clone();
-    crate::state::save_state(&data_dir, &s);
+    crate::state::save_state(&data_dir, &s)?;
     Ok(added)
 }
 
@@ -37,7 +38,7 @@ pub fn get_bookmarks(
     state: tauri::State<Mutex<crate::state::AppState>>,
     file_path: String,
 ) -> Vec<crate::state::Bookmark> {
-    let s = state.lock().unwrap();
+    let s = crate::state::recover_lock(state.inner());
     s.books
         .get(&file_path)
         .map(|r| r.bookmarks.clone())
@@ -45,6 +46,7 @@ pub fn get_bookmarks(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn add_highlight(
     state: tauri::State<Mutex<crate::state::AppState>>,
     data_dir: tauri::State<std::path::PathBuf>,
@@ -55,7 +57,7 @@ pub fn add_highlight(
     color: String,
     note: Option<String>,
 ) -> Result<(), String> {
-    let mut s = state.lock().unwrap();
+    let mut s = crate::state::recover_lock(state.inner());
     let Some(record) = s.books.get_mut(&file_path) else {
         return Err("Book not found in state".into());
     };
@@ -67,8 +69,7 @@ pub fn add_highlight(
         note,
     });
     let data_dir = data_dir.inner().clone();
-    crate::state::save_state(&data_dir, &s);
-    Ok(())
+    crate::state::save_state(&data_dir, &s)
 }
 
 #[tauri::command]
@@ -80,7 +81,7 @@ pub fn remove_highlight(
     start_offset: usize,
     end_offset: usize,
 ) -> Result<(), String> {
-    let mut s = state.lock().unwrap();
+    let mut s = crate::state::recover_lock(state.inner());
     let Some(record) = s.books.get_mut(&file_path) else {
         return Err("Book not found in state".into());
     };
@@ -94,8 +95,7 @@ pub fn remove_highlight(
         return Ok(());
     }
     let data_dir = data_dir.inner().clone();
-    crate::state::save_state(&data_dir, &s);
-    Ok(())
+    crate::state::save_state(&data_dir, &s)
 }
 
 #[tauri::command]
@@ -103,7 +103,7 @@ pub fn get_highlights(
     state: tauri::State<Mutex<crate::state::AppState>>,
     file_path: String,
 ) -> Vec<crate::state::Highlight> {
-    let s = state.lock().unwrap();
+    let s = crate::state::recover_lock(state.inner());
     s.books
         .get(&file_path)
         .map(|r| r.highlights.clone())
@@ -120,7 +120,7 @@ pub fn add_quote(
     note: Option<String>,
     id: String,
 ) -> Result<(), String> {
-    let mut s = state.lock().unwrap();
+    let mut s = crate::state::recover_lock(state.inner());
     let Some(record) = s.books.get_mut(&file_path) else {
         return Err("Book not found in state".into());
     };
@@ -131,8 +131,7 @@ pub fn add_quote(
         note,
     });
     let data_dir = data_dir.inner().clone();
-    crate::state::save_state(&data_dir, &s);
-    Ok(())
+    crate::state::save_state(&data_dir, &s)
 }
 
 #[tauri::command]
@@ -142,7 +141,7 @@ pub fn remove_quote(
     file_path: String,
     quote_id: String,
 ) -> Result<(), String> {
-    let mut s = state.lock().unwrap();
+    let mut s = crate::state::recover_lock(state.inner());
     let Some(record) = s.books.get_mut(&file_path) else {
         return Err("Book not found in state".into());
     };
@@ -152,8 +151,7 @@ pub fn remove_quote(
         return Ok(());
     }
     let data_dir = data_dir.inner().clone();
-    crate::state::save_state(&data_dir, &s);
-    Ok(())
+    crate::state::save_state(&data_dir, &s)
 }
 
 #[tauri::command]
@@ -161,7 +159,7 @@ pub fn get_quotes(
     state: tauri::State<Mutex<crate::state::AppState>>,
     file_path: String,
 ) -> Vec<crate::state::Quote> {
-    let s = state.lock().unwrap();
+    let s = crate::state::recover_lock(state.inner());
     s.books
         .get(&file_path)
         .map(|r| r.quotes.clone())

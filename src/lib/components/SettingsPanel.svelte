@@ -50,11 +50,11 @@
     <p class="panel-label">FONT</p>
     <div class="font-options">
       <button class="font-opt" class:active={fontFamily === "serif"} onclick={() => onSetFontFamily("serif")}
-        style="font-family: Georgia, serif">Serif</button>
+        style="font-family: var(--font-reading)">Serif</button>
       <button class="font-opt" class:active={fontFamily === "sans"} onclick={() => onSetFontFamily("sans")}
-        style="font-family: system-ui, sans-serif">Sans</button>
+        style="font-family: var(--font-ui)">Sans</button>
       <button class="font-opt" class:active={fontFamily === "mono"} onclick={() => onSetFontFamily("mono")}
-        style="font-family: Consolas, monospace">Mono</button>
+        style="font-family: var(--font-mono)">Mono</button>
     </div>
 
     <p class="panel-label">SIZE</p>

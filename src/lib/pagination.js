@@ -28,9 +28,14 @@ export function clampPage(pageIndex, pageCount) {
 /**
  * @param {number} containerHeight
  * @param {number} fontSize
+ * @param {number} lineHeightPx
  */
-export function calculatePageStep(containerHeight, fontSize) {
-  return Math.max(1, containerHeight - Math.round(fontSize * 1.75));
+export function calculatePageStep(containerHeight, fontSize, lineHeightPx) {
+  const safeContainerHeight = Math.max(0, containerHeight);
+  const safeFontSize = Math.max(1, fontSize);
+  const safeLineHeight = Math.max(1, lineHeightPx);
+  const usableHeight = Math.max(0, safeContainerHeight - Math.round(safeFontSize * 1.75));
+  return Math.max(safeLineHeight, Math.floor(usableHeight / safeLineHeight) * safeLineHeight, 1);
 }
 
 /**

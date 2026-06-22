@@ -4,7 +4,7 @@ use std::sync::Mutex;
 pub fn get_book_history(
     state: tauri::State<Mutex<crate::state::AppState>>,
 ) -> Vec<crate::state::BookHistoryEntry> {
-    let s = state.lock().unwrap();
+    let s = crate::state::recover_lock(state.inner());
     let mut entries: Vec<crate::state::BookHistoryEntry> = s
         .books
         .iter()
@@ -28,7 +28,7 @@ pub fn delete_book_history(
     data_dir: tauri::State<std::path::PathBuf>,
     file_path: String,
 ) -> Result<(), String> {
-    let mut s = state.lock().unwrap();
+    let mut s = crate::state::recover_lock(state.inner());
     let removed = s.books.remove(&file_path).is_some();
     let mut changed = removed;
     if s.last_opened.as_deref() == Some(&file_path) {
@@ -39,6 +39,5 @@ pub fn delete_book_history(
         return Ok(());
     }
     let data_dir = data_dir.inner().clone();
-    crate::state::save_state(&data_dir, &s);
-    Ok(())
+    crate::state::save_state(&data_dir, &s)
 }

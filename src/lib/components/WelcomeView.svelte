@@ -1,5 +1,6 @@
 <script>
-  let { isDragOver, error } = $props();
+  let { isDragOver, error, isMac = false } = $props();
+  let modKey = $derived(isMac ? "Cmd" : "Ctrl");
 </script>
 
 <main class="welcome" class:drag-active={isDragOver}>
@@ -7,7 +8,7 @@
     <p class="drop-cta">Release to open</p>
   {:else}
     <p class="welcome-main">Drop a book here</p>
-    <p class="welcome-hint">or press <kbd>Ctrl+O</kbd> to open one</p>
+    <p class="welcome-hint">or press <kbd>{modKey}+O</kbd> to open one</p>
     <p class="welcome-formats">.epub  .txt  .md</p>
     {#if error}
       <p class="welcome-error">{error}</p>

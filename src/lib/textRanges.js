@@ -135,6 +135,11 @@ export function unwrapMarks(root, selector) {
   }
 }
 
+/** @param {string} value */
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
  * @param {Node} root
  * @param {string} query
@@ -144,9 +149,15 @@ export function unwrapMarks(root, selector) {
 export function findTextRange(root, query, options = {}) {
   if (!query) return null;
   const text = root.textContent ?? "";
-  const haystack = options.caseSensitive ? text : text.toLowerCase();
-  const needle = options.caseSensitive ? query : query.toLowerCase();
-  const index = haystack.indexOf(needle);
-  if (index < 0) return null;
-  return { start: index, end: index + query.length };
+
+  if (options.caseSensitive) {
+    const index = text.indexOf(query);
+    if (index < 0) return null;
+    return { start: index, end: index + query.length };
+  }
+
+  const match = new RegExp(escapeRegExp(query), "iu").exec(text);
+  if (!match) return null;
+  const index = match.index;
+  return { start: index, end: index + match[0].length };
 }

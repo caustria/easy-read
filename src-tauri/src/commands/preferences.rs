@@ -1,8 +1,21 @@
 use std::sync::Mutex;
 
+#[derive(serde::Serialize)]
+pub struct GetStateResponse {
+    #[serde(flatten)]
+    pub state: crate::state::AppState,
+    pub state_recovered: bool,
+}
+
 #[tauri::command]
-pub fn get_state(state: tauri::State<Mutex<crate::state::AppState>>) -> crate::state::AppState {
-    state.lock().unwrap().clone()
+pub fn get_state(
+    state: tauri::State<Mutex<crate::state::AppState>>,
+    state_recovered: tauri::State<bool>,
+) -> GetStateResponse {
+    GetStateResponse {
+        state: crate::state::recover_lock(state.inner()).clone(),
+        state_recovered: *state_recovered.inner(),
+    }
 }
 
 #[tauri::command]
@@ -12,7 +25,7 @@ pub fn save_preference(
     key: String,
     value: String,
 ) -> Result<(), String> {
-    let mut s = state.lock().unwrap();
+    let mut s = crate::state::recover_lock(state.inner());
     let changed = match key.as_str() {
         "font_size" => {
             let next = value.parse::<f32>().ok();
@@ -77,8 +90,7 @@ pub fn save_preference(
         return Ok(());
     }
     let data_dir = data_dir.inner().clone();
-    crate::state::save_state(&data_dir, &s);
-    Ok(())
+    crate::state::save_state(&data_dir, &s)
 }
 
 #[tauri::command]
@@ -86,12 +98,11 @@ pub fn clear_last_opened(
     state: tauri::State<Mutex<crate::state::AppState>>,
     data_dir: tauri::State<std::path::PathBuf>,
 ) -> Result<(), String> {
-    let mut s = state.lock().unwrap();
+    let mut s = crate::state::recover_lock(state.inner());
     if s.last_opened.is_none() {
         return Ok(());
     }
     s.last_opened = None;
     let data_dir = data_dir.inner().clone();
-    crate::state::save_state(&data_dir, &s);
-    Ok(())
+    crate::state::save_state(&data_dir, &s)
 }

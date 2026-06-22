@@ -1,18 +1,5 @@
 use std::sync::Mutex;
 
-fn default_book_record(title: String, author: String) -> crate::state::BookRecord {
-    crate::state::BookRecord {
-        title,
-        author,
-        last_chapter: 0,
-        last_page: 0,
-        last_scroll_top: 0.0,
-        bookmarks: vec![],
-        highlights: vec![],
-        quotes: vec![],
-    }
-}
-
 #[tauri::command]
 pub fn update_progress(
     state: tauri::State<Mutex<crate::state::AppState>>,
@@ -23,13 +10,13 @@ pub fn update_progress(
     title: String,
     author: String,
 ) -> Result<(), String> {
-    let mut s = state.lock().unwrap();
+    let mut s = crate::state::recover_lock(state.inner());
     let last_opened_changed = s.last_opened.as_deref() != Some(file_path.as_str());
     let inserted_record = !s.books.contains_key(&file_path);
     let record = s
         .books
         .entry(file_path.clone())
-        .or_insert_with(|| default_book_record(title.clone(), author.clone()));
+        .or_insert_with(|| crate::state::default_book_record(title.clone(), author.clone()));
     let progress_changed = record.last_chapter != chapter_index
         || record.last_page != page_index
         || record.title != title
@@ -43,11 +30,11 @@ pub fn update_progress(
     record.author = author;
     s.last_opened = Some(file_path);
     let data_dir = data_dir.inner().clone();
-    crate::state::save_state(&data_dir, &s);
-    Ok(())
+    crate::state::save_state(&data_dir, &s)
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn save_session_state(
     state: tauri::State<Mutex<crate::state::AppState>>,
     data_dir: tauri::State<std::path::PathBuf>,
@@ -59,7 +46,7 @@ pub fn save_session_state(
     title: Option<String>,
     author: Option<String>,
 ) -> Result<(), String> {
-    let mut s = state.lock().unwrap();
+    let mut s = crate::state::recover_lock(state.inner());
     let next_mode = match reader_mode.as_str() {
         "scroll" => String::from("scroll"),
         _ => String::from("paginated"),
@@ -78,7 +65,7 @@ pub fn save_session_state(
         let record = s
             .books
             .entry(file_path.clone())
-            .or_insert_with(|| default_book_record(title.clone(), author.clone()));
+            .or_insert_with(|| crate::state::default_book_record(title.clone(), author.clone()));
         let next_scroll_top = scroll_top
             .filter(|value| value.is_finite())
             .map(|value| value.max(0.0));
@@ -108,6 +95,5 @@ pub fn save_session_state(
         return Ok(());
     }
     let data_dir = data_dir.inner().clone();
-    crate::state::save_state(&data_dir, &s);
-    Ok(())
+    crate::state::save_state(&data_dir, &s)
 }

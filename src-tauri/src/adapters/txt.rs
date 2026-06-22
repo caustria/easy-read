@@ -1,6 +1,7 @@
 use crate::models::book::{
     AdapterError, Book, BookAdapter, BookFormat, BookMetadata, Chapter, ChapterContent,
 };
+use chardetng::EncodingDetector;
 
 pub struct TxtAdapter;
 
@@ -11,7 +12,7 @@ impl BookAdapter for TxtAdapter {
         }
 
         let raw = std::fs::read(path).map_err(|e| AdapterError::ParseError(e.to_string()))?;
-        let content = String::from_utf8_lossy(&raw).into_owned();
+        let content = normalize_content(decode_text(&raw));
 
         let title = path
             .file_stem()
@@ -39,6 +40,40 @@ impl BookAdapter for TxtAdapter {
             file_path: path.to_string_lossy().into_owned(),
         })
     }
+}
+
+fn decode_text(raw: &[u8]) -> String {
+    if let Some((encoding, bom_len)) = encoding_rs::Encoding::for_bom(raw) {
+        let (decoded, _had_errors) = encoding.decode_without_bom_handling(&raw[bom_len..]);
+        return decoded.into_owned();
+    }
+
+    if let Ok(content) = std::str::from_utf8(raw) {
+        return content.to_string();
+    }
+
+    let mut detector = EncodingDetector::new();
+    detector.feed(raw, true);
+    let detected = detector.guess(None, true);
+    let (decoded, _encoding_used, had_errors) = detected.decode(raw);
+    if !had_errors {
+        return decoded.into_owned();
+    }
+
+    let (decoded, _encoding_used, _had_errors) = encoding_rs::WINDOWS_1252.decode(raw);
+    decoded.into_owned()
+}
+
+fn normalize_content(mut content: String) -> String {
+    if content.starts_with('\u{feff}') {
+        content.remove(0);
+    }
+
+    if content.contains('\r') {
+        content = content.replace("\r\n", "\n").replace('\r', "\n");
+    }
+
+    content
 }
 
 fn parse_txt(content: &str) -> Vec<Chapter> {
@@ -79,4 +114,56 @@ fn parse_md(content: &str) -> Vec<Chapter> {
         title: None,
         content: ChapterContent::Html(sanitized_html),
     }]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_text, normalize_content, parse_txt};
+    use crate::models::book::ChapterContent;
+
+    #[test]
+    fn normalizes_bom_and_windows_newlines_before_splitting() {
+        let content = normalize_content("\u{feff}First\r\n\r\n\r\nSecond\r\n---\r\nThird".into());
+        let chapters = parse_txt(&content);
+
+        assert_eq!(chapters.len(), 3);
+        assert!(matches!(
+            &chapters[0].content,
+            ChapterContent::PlainText(text) if text == "First"
+        ));
+        assert!(matches!(
+            &chapters[1].content,
+            ChapterContent::PlainText(text) if text == "Second"
+        ));
+        assert!(matches!(
+            &chapters[2].content,
+            ChapterContent::PlainText(text) if text == "Third"
+        ));
+    }
+
+    #[test]
+    fn decodes_windows_1252_when_utf8_is_invalid() {
+        let content = decode_text(b"Caf\xe9");
+
+        assert_eq!(content, "Caf\u{e9}");
+    }
+
+    #[test]
+    fn preserves_existing_lf_utf8_txt_splitting() {
+        let chapters = parse_txt("First\n\n\nSecond\n---\nThird");
+
+        assert_eq!(chapters.len(), 3);
+        assert!(matches!(
+            &chapters[0].content,
+            ChapterContent::PlainText(text) if text == "First"
+        ));
+        assert!(matches!(
+            &chapters[1].content,
+            ChapterContent::PlainText(text) if text == "Second"
+        ));
+        assert!(matches!(
+            &chapters[2].content,
+            ChapterContent::PlainText(text) if text == "Third"
+        ));
+    }
 }

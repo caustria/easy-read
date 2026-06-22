@@ -1,6 +1,54 @@
 /* ════════════════════════════════════════
      CSS Custom Properties — Design Tokens
      ════════════════════════════════════════ */
+  @font-face {
+    font-family: "Easy Read Serif";
+    font-style: normal;
+    font-weight: 400;
+    font-display: block;
+    src: url("/fonts/NotoSerif-Regular.woff2") format("woff2");
+  }
+
+  @font-face {
+    font-family: "Easy Read Serif";
+    font-style: normal;
+    font-weight: 600;
+    font-display: block;
+    src: url("/fonts/NotoSerif-SemiBold.woff2") format("woff2");
+  }
+
+  @font-face {
+    font-family: "Easy Read UI";
+    font-style: normal;
+    font-weight: 400;
+    font-display: block;
+    src: url("/fonts/Inter-Regular.woff2") format("woff2");
+  }
+
+  @font-face {
+    font-family: "Easy Read UI";
+    font-style: normal;
+    font-weight: 600;
+    font-display: block;
+    src: url("/fonts/Inter-SemiBold.woff2") format("woff2");
+  }
+
+  @font-face {
+    font-family: "Easy Read Mono";
+    font-style: normal;
+    font-weight: 400;
+    font-display: block;
+    src: url("/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  }
+
+  @font-face {
+    font-family: "Easy Read Mono";
+    font-style: normal;
+    font-weight: 600;
+    font-display: block;
+    src: url("/fonts/JetBrainsMono-SemiBold.woff2") format("woff2");
+  }
+
   :root {
     --bg-primary:      #FFFFFF;
     --bg-card:         #FFFFFF;
@@ -15,12 +63,12 @@
     --semantic-error:  #A83232;
     --semantic-info:   #2A7B9B;
 
-    --font-reading: Georgia, 'Noto Serif', serif;
-    --font-ui:      'Inter', system-ui, sans-serif;
-    --font-mono:    'JetBrains Mono', 'Fira Code', Consolas, monospace;
+    --font-reading: "Easy Read Serif", serif;
+    --font-ui:      "Easy Read UI", system-ui, sans-serif;
+    --font-mono:    "Easy Read Mono", Consolas, monospace;
 
     /* Overridden dynamically by JS */
-    --font-current:          Georgia, 'Noto Serif', serif;
+    --font-current:          "Easy Read Serif", serif;
     --font-size-reading:     18px;
     --line-height-reading:   1.6;
     --text-align-reading:    left;
@@ -69,6 +117,7 @@
   .search-overlay,
   .highlight-popup,
   .highlight-ctx-menu,
+  .reader-toast,
   .welcome,
   .panel-item,
   .swatch,
@@ -175,6 +224,26 @@
   .bookmark-btn { color: var(--text-muted); }
   .bookmark-btn.bookmarked { color: var(--accent); }
   .bookmark-btn.bookmarked:hover { color: var(--accent-hover); }
+
+  .reader-toast {
+    position: fixed;
+    top: 52px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 600;
+    max-width: min(520px, calc(100vw - 32px));
+    padding: 0.55rem 0.75rem;
+    background: var(--bg-card);
+    border: 1px solid var(--semantic-error);
+    border-radius: 4px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.16);
+    color: var(--semantic-error);
+    font-family: var(--font-ui);
+    font-size: 13px;
+    line-height: 1.35;
+    text-align: center;
+    pointer-events: none;
+  }
 
   /* ── Reading area ── */
   .reading-area {
@@ -288,6 +357,7 @@
     height: 4px;
     background: var(--border);
     cursor: pointer;
+    touch-action: none;
     transition: height 150ms ease;
   }
 

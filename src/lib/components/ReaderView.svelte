@@ -12,6 +12,7 @@
     isCurrentPageBookmarked,
     overallProgress,
     scrubbing,
+    error,
     readerEl = $bindable(null),
     readingArea = $bindable(null),
     progressTrackEl = $bindable(null),
@@ -42,6 +43,10 @@
     <button class="icon-btn" onclick={() => onTogglePanel("settings")} aria-label="Settings">&#9881;</button>
   </div>
 </header>
+
+{#if error}
+  <div class="reader-toast" role="status" aria-live="polite">{error}</div>
+{/if}
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -75,7 +80,7 @@
     class="progress-track"
     class:scrubbing
     bind:this={progressTrackEl}
-    onmousedown={onProgressDown}
+    onpointerdown={onProgressDown}
   >
     <div class="progress-fill" style="width: {overallProgress}%"></div>
   </div>

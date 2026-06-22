@@ -4,7 +4,7 @@ use serde::Serialize;
 pub struct BookMetadata {
     pub title: String,
     pub author: String,
-    pub cover_image: Option<Vec<u8>>,
+    pub cover_image: Option<String>,
 }
 
 #[derive(Serialize)]

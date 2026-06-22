@@ -3,6 +3,7 @@ use std::io::Read;
 use std::path::Path;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use percent_encoding::percent_decode_str;
 
 use crate::models::book::{
     AdapterError, Book, BookAdapter, BookFormat, BookMetadata, Chapter, ChapterContent,
@@ -10,10 +11,14 @@ use crate::models::book::{
 
 pub struct EpubAdapter;
 
+const MAX_EPUB_ENTRY_SIZE: u64 = 64 * 1024 * 1024;
+const MAX_EPUB_TOTAL_SIZE: u64 = 512 * 1024 * 1024;
+const EPUB_TOO_LARGE: &str = "EPUB too large to open safely";
+
 /// Resolve a relative path against a base file path within the EPUB zip.
 fn resolve_path(base_file: &str, relative: &str) -> String {
     // Strip fragment identifiers (e.g. chapter.xhtml#section1)
-    let relative = relative.split('#').next().unwrap_or(relative);
+    let relative = decode_url_path(relative);
 
     if relative.starts_with('/') {
         return relative.trim_start_matches('/').to_string();
@@ -36,6 +41,20 @@ fn resolve_path(base_file: &str, relative: &str) -> String {
     parts.join("/")
 }
 
+fn decode_url_path(path: &str) -> String {
+    let path = path.split('#').next().unwrap_or(path);
+    percent_decode_str(path).decode_utf8_lossy().into_owned()
+}
+
+fn get_resource<'a>(resources: &'a HashMap<String, Vec<u8>>, path: &str) -> Option<&'a Vec<u8>> {
+    resources.get(path).or_else(|| {
+        resources
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(path))
+            .map(|(_, bytes)| bytes)
+    })
+}
+
 fn guess_image_mime(path: &str) -> Option<&'static str> {
     let lower = path.to_lowercase();
     if lower.ends_with(".png") {
@@ -56,42 +75,86 @@ fn guess_image_mime(path: &str) -> Option<&'static str> {
 /// Replace src="..." values in HTML with base64 data URIs using resources from the zip.
 fn inline_images(html: &str, base_path: &str, resources: &HashMap<String, Vec<u8>>) -> String {
     let mut output = String::with_capacity(html.len() * 2);
-    let mut remaining = html;
+    let mut cursor = 0;
 
-    while let Some(pos) = remaining.find("src=\"") {
-        // Push everything up to and including src="
-        output.push_str(&remaining[..pos + 5]);
-        remaining = &remaining[pos + 5..];
+    while let Some((value_start, value_end)) = find_next_src_value(&html[cursor..]) {
+        let value_start = cursor + value_start;
+        let value_end = cursor + value_end;
+        let src = &html[value_start..value_end];
 
-        if let Some(end) = remaining.find('"') {
-            let src = &remaining[..end];
-
-            let inlined = if !src.starts_with("data:")
-                && !src.starts_with("http")
-                && !src.starts_with("//")
-            {
-                let resolved = resolve_path(base_path, src);
-                if let Some(mime) = guess_image_mime(&resolved) {
-                    resources
-                        .get(&resolved)
-                        .map(|bytes| format!("data:{};base64,{}", mime, BASE64.encode(bytes)))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            if let Some(data_uri) = inlined {
-                output.push_str(&data_uri);
-            } else {
-                output.push_str(src);
-            }
-            remaining = &remaining[end..]; // position at closing "
+        output.push_str(&html[cursor..value_start]);
+        if let Some(data_uri) = inline_image_src(src, base_path, resources) {
+            output.push_str(&data_uri);
+        } else {
+            output.push_str(src);
         }
+        cursor = value_end;
     }
-    output.push_str(remaining);
+
+    output.push_str(&html[cursor..]);
     output
+}
+
+fn find_next_src_value(input: &str) -> Option<(usize, usize)> {
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        if bytes[i].eq_ignore_ascii_case(&b's')
+            && bytes[i + 1].eq_ignore_ascii_case(&b'r')
+            && bytes[i + 2].eq_ignore_ascii_case(&b'c')
+            && (i == 0 || !is_attr_name_byte(bytes[i - 1]))
+        {
+            let mut j = i + 3;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'=' {
+                j += 1;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'\'') {
+                    let quote = bytes[j];
+                    let value_start = j + 1;
+                    if let Some(end_offset) = bytes[value_start..].iter().position(|b| *b == quote)
+                    {
+                        return Some((value_start, value_start + end_offset));
+                    }
+                    return None;
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn is_attr_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':')
+}
+
+fn inline_image_src(
+    src: &str,
+    base_path: &str,
+    resources: &HashMap<String, Vec<u8>>,
+) -> Option<String> {
+    let lower = src.trim_start().to_ascii_lowercase();
+    if lower.starts_with("data:") || lower.starts_with("http:") || lower.starts_with("https:") {
+        return None;
+    }
+    if src.trim_start().starts_with("//") {
+        return None;
+    }
+
+    let resolved = resolve_path(base_path, src.trim());
+    let mime = guess_image_mime(&resolved)?;
+    let bytes = get_resource(resources, &resolved)?;
+    Some(format!("data:{};base64,{}", mime, BASE64.encode(bytes)))
+}
+
+fn image_data_uri(path: &str, bytes: &[u8]) -> Option<String> {
+    let mime = guess_image_mime(path)?;
+    Some(format!("data:{};base64,{}", mime, BASE64.encode(bytes)))
 }
 
 fn extract_html_title(html: &str) -> Option<String> {
@@ -113,8 +176,8 @@ fn clean_chapter_title(title: &str, fallback_number: usize) -> Option<String> {
     }
     let lower = trimmed.to_lowercase();
     for prefix in &["chapter", "chap", "section", "part", "item", "sec", "ch"] {
-        if lower.starts_with(prefix) {
-            let rest = lower[prefix.len()..].trim_start_matches(|c: char| !c.is_ascii_digit());
+        if let Some(stripped) = lower.strip_prefix(prefix) {
+            let rest = stripped.trim_start_matches(|c: char| !c.is_ascii_digit());
             if !rest.is_empty()
                 && rest
                     .chars()
@@ -180,6 +243,7 @@ fn parse_nav_toc(nav_path: &str, nav_bytes: &[u8]) -> HashMap<String, String> {
             if let Some(href) = anchor.attribute("href") {
                 let label: String = anchor
                     .descendants()
+                    .filter(|n| n.is_text())
                     .filter_map(|n| n.text())
                     .collect::<Vec<_>>()
                     .join(" ")
@@ -204,26 +268,48 @@ impl BookAdapter for EpubAdapter {
         let mut archive =
             zip::ZipArchive::new(cursor).map_err(|e| AdapterError::ParseError(e.to_string()))?;
 
-        // Read all entries into a HashMap for random access
+        // Read all entries into a HashMap for random access, with conservative caps.
         let mut resources: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut total_decompressed_size: u64 = 0;
         for i in 0..archive.len() {
-            let mut entry = archive
-                .by_index(i)
-                .map_err(|e| AdapterError::ParseError(e.to_string()))?;
+            let mut entry = match archive.by_index(i) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    eprintln!("Skipping unreadable EPUB entry at index {}: {}", i, e);
+                    continue;
+                }
+            };
             if !entry.is_file() {
                 continue;
             }
+            let entry_size = entry.size();
+            if entry_size > MAX_EPUB_ENTRY_SIZE {
+                return Err(AdapterError::ParseError(EPUB_TOO_LARGE.into()));
+            }
+            total_decompressed_size = total_decompressed_size
+                .checked_add(entry_size)
+                .ok_or_else(|| AdapterError::ParseError(EPUB_TOO_LARGE.into()))?;
+            if total_decompressed_size > MAX_EPUB_TOTAL_SIZE {
+                return Err(AdapterError::ParseError(EPUB_TOO_LARGE.into()));
+            }
+
             let name = entry.name().to_string();
             let mut buf = Vec::new();
-            entry
-                .read_to_end(&mut buf)
-                .map_err(|e| AdapterError::ParseError(e.to_string()))?;
+            if let Err(e) = entry.read_to_end(&mut buf) {
+                eprintln!("Skipping unreadable EPUB entry {}: {}", name, e);
+                continue;
+            }
             resources.insert(name, buf);
         }
 
+        if get_resource(&resources, "META-INF/encryption.xml").is_some() {
+            return Err(AdapterError::ParseError(
+                "This EPUB is DRM-protected and cannot be opened".into(),
+            ));
+        }
+
         // --- Parse container.xml → OPF path ---
-        let container_bytes = resources
-            .get("META-INF/container.xml")
+        let container_bytes = get_resource(&resources, "META-INF/container.xml")
             .ok_or_else(|| AdapterError::ParseError("Missing META-INF/container.xml".into()))?;
         let container_str = std::str::from_utf8(container_bytes)
             .map_err(|e| AdapterError::ParseError(e.to_string()))?;
@@ -233,12 +319,11 @@ impl BookAdapter for EpubAdapter {
             .descendants()
             .find(|n| n.has_tag_name("rootfile"))
             .and_then(|n| n.attribute("full-path"))
-            .ok_or_else(|| AdapterError::ParseError("No rootfile in container.xml".into()))?
-            .to_string();
+            .map(decode_url_path)
+            .ok_or_else(|| AdapterError::ParseError("No rootfile in container.xml".into()))?;
 
         // --- Parse OPF ---
-        let opf_bytes = resources
-            .get(&opf_path)
+        let opf_bytes = get_resource(&resources, &opf_path)
             .ok_or_else(|| AdapterError::ParseError(format!("OPF not found: {}", opf_path)))?;
         let opf_str =
             std::str::from_utf8(opf_bytes).map_err(|e| AdapterError::ParseError(e.to_string()))?;
@@ -300,8 +385,7 @@ impl BookAdapter for EpubAdapter {
         let cover_image = cover_id
             .as_deref()
             .and_then(|id| manifest.get(id))
-            .and_then(|p| resources.get(p))
-            .cloned();
+            .and_then(|p| get_resource(&resources, p).and_then(|bytes| image_data_uri(p, bytes)));
 
         // Build TOC label map: zip-path → chapter label
         // Prefer EPUB3 nav, fall back to EPUB2 NCX.
@@ -319,7 +403,7 @@ impl BookAdapter for EpubAdapter {
             .and_then(|n| n.attribute("href"))
             .map(|href| resolve_path(&opf_path, href));
         if let Some(ref nav_path) = nav_path {
-            if let Some(bytes) = resources.get(nav_path) {
+            if let Some(bytes) = get_resource(&resources, nav_path) {
                 toc_labels = parse_nav_toc(nav_path, bytes);
             }
         }
@@ -333,7 +417,7 @@ impl BookAdapter for EpubAdapter {
                 .and_then(|n| n.attribute("href"))
                 .map(|href| resolve_path(&opf_path, href));
             if let Some(ref ncx_path) = ncx_path {
-                if let Some(bytes) = resources.get(ncx_path) {
+                if let Some(bytes) = get_resource(&resources, ncx_path) {
                     toc_labels = parse_ncx_toc(ncx_path, bytes);
                 }
             }
@@ -358,7 +442,7 @@ impl BookAdapter for EpubAdapter {
         // Build chapters
         let mut chapters: Vec<Chapter> = Vec::new();
         for (index, item_path) in spine_paths.iter().enumerate() {
-            let html_bytes = match resources.get(item_path) {
+            let html_bytes = match get_resource(&resources, item_path) {
                 Some(b) => b,
                 None => continue,
             };
@@ -391,7 +475,7 @@ impl BookAdapter for EpubAdapter {
                 .filter(|t| !is_placeholder(t))
                 .map(|t| t.trim().to_string())
                 .or_else(|| {
-                    extract_html_title(&html_str)
+                    extract_html_title(html_str)
                         .filter(|t| !is_placeholder(t))
                         .and_then(|t| clean_chapter_title(&t, index + 1))
                 })
@@ -420,5 +504,182 @@ impl BookAdapter for EpubAdapter {
             format: BookFormat::Epub,
             file_path: path.to_string_lossy().into_owned(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{inline_images, EpubAdapter};
+    use crate::models::book::{BookAdapter, ChapterContent};
+    use std::collections::HashMap;
+    use std::fs::File;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use zip::write::SimpleFileOptions;
+
+    fn write_test_epub(entries: &[(&str, &[u8])]) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "easy-read-phase5-{}-{}.epub",
+            std::process::id(),
+            unique
+        ));
+        let file = File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+        for (name, bytes) in entries {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap();
+
+        path
+    }
+
+    #[test]
+    fn parses_percent_encoded_epub_paths_with_case_fallback_and_cover_data_uri() {
+        let container = br#"<?xml version="1.0"?>
+            <container>
+              <rootfiles>
+                <rootfile full-path="OPS/package.opf"/>
+              </rootfiles>
+            </container>"#;
+        let opf = br#"<?xml version="1.0"?>
+            <package>
+              <metadata>
+                <title>Phase 5 Fixture</title>
+                <creator>Fixture Author</creator>
+              </metadata>
+              <manifest>
+                <item id="nav" href="nav.xhtml" properties="nav" media-type="application/xhtml+xml"/>
+                <item id="chapter" href="Text/My%20Chapter.xhtml" media-type="application/xhtml+xml"/>
+                <item id="cover" href="Images/Cover%20Image.PNG" properties="cover-image" media-type="image/png"/>
+                <item id="image" href="Images/Pic%20One.PNG" media-type="image/png"/>
+              </manifest>
+              <spine>
+                <itemref idref="chapter"/>
+              </spine>
+            </package>"#;
+        let nav = br#"<html xmlns:epub="http://www.idpf.org/2007/ops">
+            <body>
+              <nav epub:type="toc">
+                <ol><li><a href="Text/My%20Chapter.xhtml">Decoded Chapter</a></li></ol>
+              </nav>
+            </body>
+          </html>"#;
+        let chapter = br#"<html>
+            <head><title>Ignored Placeholder</title></head>
+            <body><p>Hello</p><img ALT='pic' SRC = '../Images/Pic%20One.PNG'></body>
+          </html>"#;
+        let path = write_test_epub(&[
+            ("META-INF/container.xml", container.as_slice()),
+            ("OPS/package.opf", opf.as_slice()),
+            ("OPS/nav.xhtml", nav.as_slice()),
+            ("OPS/Text/My Chapter.XHTML", chapter.as_slice()),
+            ("OPS/Images/Pic One.PNG", b"image bytes"),
+            ("OPS/Images/Cover Image.PNG", b"cover bytes"),
+        ]);
+
+        let book = EpubAdapter::parse(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        assert_eq!(book.metadata.title, "Phase 5 Fixture");
+        assert_eq!(book.metadata.author, "Fixture Author");
+        assert!(book
+            .metadata
+            .cover_image
+            .as_deref()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
+        assert_eq!(book.chapters.len(), 1);
+        assert_eq!(book.chapters[0].title.as_deref(), Some("Decoded Chapter"));
+        assert!(matches!(
+            &book.chapters[0].content,
+            ChapterContent::Html(html) if html.contains("data:image/png;base64,")
+        ));
+    }
+
+    #[test]
+    fn rejects_epubs_with_encryption_xml() {
+        let container = br#"<?xml version="1.0"?>
+            <container>
+              <rootfiles>
+                <rootfile full-path="OPS/package.opf"/>
+              </rootfiles>
+            </container>"#;
+        let path = write_test_epub(&[
+            ("META-INF/container.xml", container.as_slice()),
+            ("META-INF/encryption.xml", b"<encryption/>"),
+        ]);
+
+        let err = match EpubAdapter::parse(&path) {
+            Ok(_) => panic!("encrypted EPUB should be rejected"),
+            Err(err) => err.to_string(),
+        };
+        std::fs::remove_file(path).unwrap();
+
+        assert!(err.contains("DRM-protected"));
+    }
+
+    #[test]
+    fn opens_epub_when_unused_entry_is_corrupt() {
+        let container = br#"<?xml version="1.0"?>
+            <container>
+              <rootfiles>
+                <rootfile full-path="OPS/package.opf"/>
+              </rootfiles>
+            </container>"#;
+        let opf = br#"<?xml version="1.0"?>
+            <package>
+              <metadata>
+                <title>Corrupt Entry Fixture</title>
+                <creator>Fixture Author</creator>
+              </metadata>
+              <manifest>
+                <item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>
+              </manifest>
+              <spine>
+                <itemref idref="chapter"/>
+              </spine>
+            </package>"#;
+        let chapter = br#"<html><body><p>Readable</p></body></html>"#;
+        let corrupt_payload = b"CORRUPT_ME_PAYLOAD";
+        let path = write_test_epub(&[
+            ("bad.bin", corrupt_payload),
+            ("META-INF/container.xml", container.as_slice()),
+            ("OPS/package.opf", opf.as_slice()),
+            ("OPS/chapter.xhtml", chapter.as_slice()),
+        ]);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let corrupt_at = bytes
+            .windows(corrupt_payload.len())
+            .position(|window| window == corrupt_payload)
+            .unwrap();
+        bytes[corrupt_at] = b'X';
+        std::fs::write(&path, bytes).unwrap();
+
+        let book = EpubAdapter::parse(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        assert_eq!(book.chapters.len(), 1);
+    }
+
+    #[test]
+    fn inline_images_handles_single_quotes_case_whitespace_and_percent_encoding() {
+        let mut resources = HashMap::new();
+        resources.insert(
+            "OPS/Images/Pic One.PNG".to_string(),
+            b"image bytes".to_vec(),
+        );
+
+        let html = "<img ALT='pic' SRC = '../Images/Pic%20One.PNG'>";
+        let inlined = inline_images(html, "OPS/Text/chapter.xhtml", &resources);
+
+        assert!(inlined.contains("data:image/png;base64,"));
     }
 }
