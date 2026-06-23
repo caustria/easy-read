@@ -4,6 +4,8 @@ A lightweight portable desktop e-reader built with **Rust**, **Tauri v2**, and *
 
 Your progress, bookmarks, highlights, quotes, history, and preferences are saved in a single readable `state.json` file.
 
+![Easy Read screenshot](screenshot.png)
+
 ---
 
 ## Keyboard Shortcuts
